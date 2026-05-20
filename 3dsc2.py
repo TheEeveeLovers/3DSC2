@@ -15,10 +15,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGroupBox, QTextEdit, QFileDialog, QSlider)
 from PyQt6.QtCore import (QTimer, QSettings, Qt, QPoint, QByteArray, 
                           QEvent, QObject, pyqtSignal)
-from PyQt6.QtGui import QPainter, QPen, QColor, QMouseEvent, QCloseEvent
+from PyQt6.QtGui import QPainter, QPen, QColor, QMouseEvent, QCloseEvent, QImage, QPixmap
 from PyQt6.QtNetwork import QUdpSocket, QHostAddress
-
-from ai_agent import AIManager
 
 # Constants
 CPAD_BOUND = 0x5d0
@@ -186,6 +184,41 @@ def build_calibration_mask(frame):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     return mask
+
+def fit_image_to_window(image, window_name):
+    try:
+        _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+    except cv2.error:
+        return image
+    if win_w <= 0 or win_h <= 0:
+        return image
+
+    img_h, img_w = image.shape[:2]
+    scale = min(win_w / img_w, win_h / img_h)
+    draw_w = max(1, int(round(img_w * scale)))
+    draw_h = max(1, int(round(img_h * scale)))
+    resized = cv2.resize(image, (draw_w, draw_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((win_h, win_w, image.shape[2]), dtype=image.dtype)
+    x0 = (win_w - draw_w) // 2
+    y0 = (win_h - draw_h) // 2
+    canvas[y0:y0 + draw_h, x0:x0 + draw_w] = resized
+    return canvas
+
+def window_to_image_coords(x, y, window_name, image_size):
+    img_w, img_h = image_size
+    try:
+        _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+    except cv2.error:
+        return x, y
+    if win_w <= 0 or win_h <= 0:
+        return x, y
+
+    scale = min(win_w / img_w, win_h / img_h)
+    draw_w = max(1, int(round(img_w * scale)))
+    draw_h = max(1, int(round(img_h * scale)))
+    x0 = (win_w - draw_w) // 2
+    y0 = (win_h - draw_h) // 2
+    return (x - x0) / scale, (y - y0) / scale
 
 def variant_to_button(val):
     if val is None: return GamepadButtons.ButtonInvalid
@@ -406,6 +439,7 @@ class ThreadedCamera:
 
     def stop(self):
         self.running = False
+        self.thread.join(timeout=1.0)
         self.cap.release()
 
 class RemoteCamHandler(BaseHTTPRequestHandler):
@@ -609,6 +643,86 @@ class RemapConfig(QDialog):
         state.settings.setValue("touchButton2Y", self.t2y.text())
         self.hide()
 
+class AspectImageLabel(QLabel):
+    def __init__(self, touch_callback=None, parent=None):
+        super().__init__(parent)
+        self.touch_callback = touch_callback
+        self.qimage = None
+        self.image_size = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(160, 120)
+        self.setStyleSheet("background: #000;")
+
+    def set_frame(self, frame):
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        qimage = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+        self.qimage = qimage.copy()
+        self.image_size = (w, h)
+        self.update_pixmap()
+
+    def resizeEvent(self, event):
+        self.update_pixmap()
+        super().resizeEvent(event)
+
+    def update_pixmap(self):
+        if self.qimage is None:
+            return
+        pixmap = QPixmap.fromImage(self.qimage).scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(pixmap)
+
+    def image_coords_from_event(self, event):
+        if not self.image_size:
+            return None
+        img_w, img_h = self.image_size
+        label_w, label_h = self.width(), self.height()
+        scale = min(label_w / img_w, label_h / img_h)
+        draw_w = img_w * scale
+        draw_h = img_h * scale
+        x0 = (label_w - draw_w) / 2.0
+        y0 = (label_h - draw_h) / 2.0
+        pos = event.position()
+        img_x = (pos.x() - x0) / scale
+        img_y = (pos.y() - y0) / scale
+        return img_x, img_y
+
+    def mousePressEvent(self, event):
+        if self.touch_callback and event.button() == Qt.MouseButton.LeftButton:
+            coords = self.image_coords_from_event(event)
+            if coords:
+                self.touch_callback("press", coords[0], coords[1])
+
+    def mouseMoveEvent(self, event):
+        if self.touch_callback and event.buttons() & Qt.MouseButton.LeftButton:
+            coords = self.image_coords_from_event(event)
+            if coords:
+                self.touch_callback("move", coords[0], coords[1])
+
+    def mouseReleaseEvent(self, event):
+        if self.touch_callback and event.button() == Qt.MouseButton.LeftButton:
+            self.touch_callback("release", 0, 0)
+
+class ScreenViewWindow(QWidget):
+    def __init__(self, title, size, touch_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.label = AspectImageLabel(touch_callback, self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+        self.resize(*size)
+
+    def set_frame(self, frame):
+        self.label.set_frame(frame)
+
+    def closeEvent(self, event):
+        self.hide()
+        event.ignore()
+
 class CalibrationState:
     IDLE = 0
     WAIT_TOP = 1
@@ -782,7 +896,7 @@ class AppWindow(QMainWindow):
         self.setup_ui()
         self.gamepad_monitor = GamepadMonitor(self)
         self.calibration_manager = CalibrationManager(self.signals)
-        self.ai_manager = AIManager()
+        self.ai_manager = None
         self.setup_connections()
         
         state.heartbeat_running = True
@@ -796,6 +910,11 @@ class AppWindow(QMainWindow):
         self.top_target = TOP_TARGET
         self.bottom_target = BOTTOM_TARGET
         self.latest_frame = None
+        self.last_top_frame = None
+        self.last_bottom_frame = None
+        self.top_view_window = None
+        self.bottom_view_window = None
+        self.combined_view_window = None
         self.frame_lock = threading.Lock()
         self.running = False
         self.roi_points = []
@@ -804,6 +923,7 @@ class AppWindow(QMainWindow):
         self.cap = None
         self.camera_thread = None
         self.windows_created = False
+        self.view_mode = None
         self.sampling_color = False
         self.roi_locked = False
         self.combined_view = False
@@ -933,46 +1053,58 @@ class AppWindow(QMainWindow):
         self.load_tas_btn.clicked.connect(self.load_tas)
 
         self.ai_record_btn.clicked.connect(self.toggle_ai_record)
-        self.ai_train_btn.clicked.connect(self.ai_manager.train)
-        self.ai_reset_btn.clicked.connect(self.ai_manager.reset_data)
+        self.ai_train_btn.clicked.connect(self.train_ai_model)
+        self.ai_reset_btn.clicked.connect(self.reset_ai_data)
         self.ai_enable_btn.toggled.connect(self.toggle_ai_active)
 
         # Calibration Adjustments
         self.pick_color_btn.clicked.connect(self.start_sampling_color)
         self.lock_roi_checkbox.stateChanged.connect(self.toggle_roi_lock)
-        self.touch_calib_btn.clicked.connect(self.start_touch_calibration)
-        self.touch_calib_auto_cb.stateChanged.connect(self.toggle_touch_auto)
-        self.reset_touch_calib_btn.clicked.connect(self.reset_touch_calibration)
         self.tol_slider.valueChanged.connect(self.update_tolerance)
         self.mask_checkbox.toggled.connect(self.toggle_mask_view)
+        self.combined_view_cb.toggled.connect(self.toggle_combined)
 
         self.signals.status_update.connect(self.status_label.setText)
         self.signals.error_occurred.connect(lambda m: QMessageBox.critical(self, "Error", m))
-        self.ai_manager.status_update.connect(self.status_label.setText)
+
+    def get_ai_manager(self):
+        if self.ai_manager is None:
+            self.status_label.setText("Loading AI module...")
+            QApplication.processEvents()
+            from ai_agent import AIManager
+            self.ai_manager = AIManager()
+            self.ai_manager.status_update.connect(self.status_label.setText)
+        return self.ai_manager
 
     def toggle_ai_record(self):
-        recording = self.ai_manager.toggle_recording()
+        ai_manager = self.get_ai_manager()
+        recording = ai_manager.toggle_recording()
         self.ai_record_btn.setText("Stop Recording" if recording else "Record Expert")
+
+    def train_ai_model(self):
+        self.get_ai_manager().train()
+
+    def reset_ai_data(self):
+        self.get_ai_manager().reset_data()
         
     def toggle_ai_active(self, checked):
         state.ai_controlled = checked
         if checked:
-            success = self.ai_manager.toggle_active()
+            ai_manager = self.get_ai_manager()
+            success = ai_manager.toggle_active()
             if not success:
                 self.ai_enable_btn.setChecked(False)
                 state.ai_controlled = False
             else:
                 self.status_label.setText("AI Agent Active")
         else:
-            self.ai_manager.is_active = False
+            if self.ai_manager is not None:
+                self.ai_manager.is_active = False
             self.status_label.setText("AI Agent Disabled")
 
     def toggle_roi_lock(self, s):
         self.roi_locked = (s != 0)
         self.status_label.setText("ROIs Locked" if self.roi_locked else "ROIs Unlocked")
-
-    def toggle_touch_auto(self, s):
-        self.touch_calibration_auto = (s != 0)
 
     def update_ip(self, t): 
         state.ipAddress = t
@@ -1008,19 +1140,8 @@ class AppWindow(QMainWindow):
 
     def toggle_combined(self, checked):
         self.combined_view = checked
-        if not checked:
-            try: cv2.destroyWindow("3DS Combined")
-            except: pass
-            self.create_opencv_windows()
-        else:
-            try: cv2.destroyWindow("Top Screen")
-            except: pass
-            try: cv2.destroyWindow("Bottom Screen")
-            except: pass
-            cv2.namedWindow("3DS Combined", cv2.WINDOW_NORMAL)
-            cv2.setMouseCallback("3DS Combined", self.mouse_touch_callback)
-            # Default size for combined
-            cv2.resizeWindow("3DS Combined", 400, 480)
+        if self.windows_created:
+            self.sync_view_windows(force=True)
 
     def toggle_record(self):
         if not state.is_recording:
@@ -1098,19 +1219,67 @@ class AppWindow(QMainWindow):
                 self.latest_frame = frame.copy()
 
     def create_opencv_windows(self):
-        if not self.windows_created:
-            cv2.namedWindow("ROI Selector", cv2.WINDOW_NORMAL)
-            cv2.setMouseCallback("ROI Selector", self.mouse_roi_callback)
-            
-            # Create resizable windows
-            cv2.namedWindow("Top Screen", cv2.WINDOW_NORMAL)
-            cv2.namedWindow("Bottom Screen", cv2.WINDOW_NORMAL)
-            cv2.setMouseCallback("Bottom Screen", self.mouse_touch_callback)
-            
-            # Set initial default sizes
-            cv2.resizeWindow("Top Screen", *self.top_target)
-            cv2.resizeWindow("Bottom Screen", *self.bottom_target)
-            self.windows_created = True
+        cv2.namedWindow("ROI Selector", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        cv2.setMouseCallback("ROI Selector", self.mouse_roi_callback)
+        self.sync_view_windows(force=True)
+        self.windows_created = True
+
+    def ensure_view_windows(self):
+        if self.top_view_window is None:
+            self.top_view_window = ScreenViewWindow("Top Screen", self.top_target)
+        if self.bottom_view_window is None:
+            self.bottom_view_window = ScreenViewWindow("Bottom Screen", self.bottom_target, self.handle_bottom_touch)
+        if self.combined_view_window is None:
+            self.combined_view_window = ScreenViewWindow("3DS Combined", (400, 480), self.handle_combined_touch)
+
+    def sync_view_windows(self, force=False):
+        mode = "combined" if self.combined_view else "split"
+        if not force and self.view_mode == mode:
+            return
+        self.ensure_view_windows()
+
+        if mode == "combined":
+            self.destroy_opencv_window("Top Screen")
+            self.destroy_opencv_window("Bottom Screen")
+            self.top_view_window.hide()
+            self.bottom_view_window.hide()
+            self.combined_view_window.show()
+            self.combined_view_window.set_frame(self.make_combined_view())
+        else:
+            self.destroy_opencv_window("3DS Combined")
+            self.combined_view_window.hide()
+            self.top_view_window.show()
+            self.bottom_view_window.show()
+            if self.last_top_frame is not None:
+                self.top_view_window.set_frame(self.last_top_frame)
+            if self.last_bottom_frame is not None:
+                self.bottom_view_window.set_frame(self.last_bottom_frame)
+        cv2.waitKey(1)
+        self.view_mode = mode
+
+    def make_combined_view(self):
+        combined = np.full((480, 400, 3), 24, dtype=np.uint8)
+        cv2.putText(combined, "TOP", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120, 120, 120), 2)
+        cv2.putText(combined, "BOTTOM", (52, 268), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120, 120, 120), 2)
+        if self.last_top_frame is not None:
+            combined[0:240, 0:400] = self.last_top_frame
+        if self.last_bottom_frame is not None:
+            combined[240:480, 40:360] = self.last_bottom_frame
+        if state.touchScreenPressed:
+            draw_touch = (state.touchScreenPosition.x() + 40, state.touchScreenPosition.y() + 240)
+            cv2.circle(combined, draw_touch, 6, (0, 0, 255), -1)
+        return combined
+
+    def destroy_opencv_window(self, name):
+        try:
+            cv2.destroyWindow(name)
+        except cv2.error:
+            pass
+
+    def hide_view_windows(self):
+        for window in (self.top_view_window, self.bottom_view_window, self.combined_view_window):
+            if window is not None:
+                window.hide()
 
     def mouse_roi_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -1143,42 +1312,31 @@ class AppWindow(QMainWindow):
                     self.lock_roi_checkbox.setChecked(True)
                     self.signals.status_update.emit("ROIs complete. Locked.")
 
+    def handle_touch_event(self, action, raw_x, raw_y):
+        raw_x = max(0, min(int(raw_x), TOUCH_SCREEN_WIDTH - 1))
+        raw_y = max(0, min(int(raw_y), TOUCH_SCREEN_HEIGHT - 1))
+
+        if action == "press":
+            state.touchScreenPressed = True
+            state.touchScreenPosition = QPoint(raw_x, raw_y)
+        elif action == "move":
+            state.touchScreenPosition = QPoint(raw_x, raw_y)
+        elif action == "release":
+            state.touchScreenPressed = False
+
+    def handle_bottom_touch(self, action, x, y):
+        self.handle_touch_event(action, x, y)
+
+    def handle_combined_touch(self, action, x, y):
+        self.handle_touch_event(action, x - 40, y - 240)
+
     def mouse_touch_callback(self, event, x, y, flags, param):
-        # Scale window coordinates to touch screen resolution
-        try:
-            if self.combined_view:
-                rect = cv2.getWindowImageRect("3DS Combined")
-                if rect[2] > 0 and rect[3] > 0:
-                    # Bottom screen is at the bottom half of the combined view
-                    # Top is (400, 240), Bottom is (320, 240)
-                    # Combined canvas is (400, 480)
-                    # We need to scale relative to the bottom 320x240 patch centered at bottom half
-                    
-                    # Effective width of top screen in window
-                    win_w = rect[2]
-                    win_h = rect[3]
-                    
-                    # Combined view logic: Top (400x240), Bottom (320x240) centered below
-                    # x_offset = (400 - 320) // 2 = 40
-                    # y_offset = 240
-                    
-                    # Convert window x, y to canvas coordinates (400, 480)
-                    canvas_x = x * 400 / win_w
-                    canvas_y = y * 480 / win_h
-                    
-                    raw_x = int((canvas_x - 40) * TOUCH_SCREEN_WIDTH / 320)
-                    raw_y = int((canvas_y - 240) * TOUCH_SCREEN_HEIGHT / 240)
-                else:
-                    raw_x, raw_y = x, y
-            else:
-                rect = cv2.getWindowImageRect("Bottom Screen")
-                if rect[2] > 0 and rect[3] > 0:
-                    raw_x = int(x * TOUCH_SCREEN_WIDTH / rect[2])
-                    raw_y = int(y * TOUCH_SCREEN_HEIGHT / rect[3])
-                else:
-                    raw_x, raw_y = x, y
-        except:
-            raw_x, raw_y = x, y
+        if self.combined_view:
+            canvas_x, canvas_y = window_to_image_coords(x, y, "3DS Combined", (400, 480))
+            raw_x = int(canvas_x - 40)
+            raw_y = int(canvas_y - 240)
+        else:
+            raw_x, raw_y = window_to_image_coords(x, y, "Bottom Screen", self.bottom_target)
 
         raw_x = max(0, min(int(raw_x), TOUCH_SCREEN_WIDTH - 1))
         raw_y = max(0, min(int(raw_y), TOUCH_SCREEN_HEIGHT - 1))
@@ -1213,6 +1371,7 @@ class AppWindow(QMainWindow):
         
         # We also need to start the display loop
         self.running = True
+        self.create_opencv_windows()
         self.display_timer = QTimer()
         self.display_timer.timeout.connect(self.update_display)
         self.display_timer.start(33)
@@ -1242,14 +1401,28 @@ class AppWindow(QMainWindow):
 
     def stop_camera(self):
         self.running = False
-        if hasattr(self, 'display_timer'): self.display_timer.stop()
-        if self.camera_thread: self.camera_thread.join(timeout=1.0)
-        if hasattr(self, 'threaded_cap'): self.threaded_cap.stop()
-        cv2.destroyAllWindows(); self.windows_created = False
+        if hasattr(self, 'display_timer'):
+            self.display_timer.stop()
+            try:
+                self.display_timer.timeout.disconnect(self.update_display)
+            except TypeError:
+                pass
+        if self.camera_thread:
+            self.camera_thread.join(timeout=1.0)
+            self.camera_thread = None
+        threaded_cap = getattr(self, 'threaded_cap', None)
+        if threaded_cap is not None:
+            threaded_cap.stop()
+            self.threaded_cap = None
+        self.hide_view_windows()
+        self.destroy_opencv_window("ROI Selector")
+        self.windows_created = False; self.view_mode = None
         self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
 
     def reset_rois(self):
         self.screens.clear(); self.all_points.clear(); self.roi_points.clear()
+        self.last_top_frame = None
+        self.last_bottom_frame = None
         self.roi_locked = False
         self.lock_roi_checkbox.setChecked(False)
         self.signals.status_update.emit("ROIs Reset & Unlocked")
@@ -1268,6 +1441,8 @@ class AppWindow(QMainWindow):
     def update_display(self):
         with self.frame_lock: frame = self.latest_frame.copy() if self.latest_frame is not None else None
         if frame is None: return
+        if self.windows_created:
+            self.sync_view_windows()
         
         # Run calibration logic
         new_screens = self.calibration_manager.process(frame)
@@ -1301,16 +1476,18 @@ class AppWindow(QMainWindow):
             for i in range(1, len(self.roi_points)):
                 cv2.line(display, tuple(self.roi_points[i-1]), tuple(self.roi_points[i]), (255, 255, 0), 2)
 
+        top = None
+        bottom = None
+
         if len(self.screens) >= 1:
             top = self.warp_to_target(frame, self.screens[0], self.top_target)
-            if not self.combined_view:
-                cv2.imshow("Top Screen", top)
-            
+            self.last_top_frame = top
+
             # AI Logic
-            if self.ai_manager.is_recording:
+            if self.ai_manager is not None and self.ai_manager.is_recording:
                 self.ai_manager.add_sample(top, [state.lx, state.ly, state.rx, state.ry], state.buttons)
             
-            if state.ai_controlled and self.ai_manager.is_active:
+            if state.ai_controlled and self.ai_manager is not None and self.ai_manager.is_active:
                 axes, buttons = self.ai_manager.predict(top)
                 if axes is not None:
                     state.lx, state.ly, state.rx, state.ry = axes
@@ -1318,22 +1495,17 @@ class AppWindow(QMainWindow):
 
         if len(self.screens) >= 2:
             bottom = self.warp_to_target(frame, self.screens[1], self.bottom_target)
-            
-            if self.combined_view:
-                # Top (400, 240), Bottom (320, 240)
-                # Create a black canvas (480, 400) - Height x Width
-                combined = np.zeros((480, 400, 3), dtype=np.uint8)
-                combined[0:240, 0:400] = top
-                # Center bottom: x_offset = (400 - 320) // 2 = 40
-                combined[240:480, 40:360] = bottom
-                
-                if state.touchScreenPressed:
-                    # Offset touch by (40, 240) for drawing
-                    draw_touch = (state.touchScreenPosition.x() + 40, state.touchScreenPosition.y() + 240)
-                    cv2.circle(combined, draw_touch, 6, (0, 0, 255), -1)
-                
-                cv2.imshow("3DS Combined", combined)
-            else:
+            self.last_bottom_frame = bottom
+
+        if self.combined_view:
+            combined = self.make_combined_view()
+            if self.combined_view_window is not None:
+                self.combined_view_window.set_frame(combined)
+        else:
+            if top is not None:
+                if self.top_view_window is not None:
+                    self.top_view_window.set_frame(top)
+            if bottom is not None:
                 if state.touchScreenPressed:
                     cv2.circle(
                         bottom,
@@ -1342,7 +1514,8 @@ class AppWindow(QMainWindow):
                         (0, 0, 255),
                         -1
                     )
-                cv2.imshow("Bottom Screen", bottom)
+                if self.bottom_view_window is not None:
+                    self.bottom_view_window.set_frame(bottom)
 
         if hasattr(self, 'threaded_cap') and self.threaded_cap:
             fps = self.threaded_cap.cap.get(cv2.CAP_PROP_FPS)

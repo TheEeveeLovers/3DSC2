@@ -13,6 +13,23 @@ So I made this!
 3DSC2 lets you stream and control **any 3DS**, using just a camera.  
 No capture card, no soldering.
 
+## Installation
+
+### Installing 3DSC2 (PC)
+1. Clone the repo:
+   ```bash
+   git clone https://github.com/cylin577/3DSC2
+   cd 3DSC2
+   ```
+
+### Installing 3DSC2C (3DS)
+You can install the calibration companion app directly from Universal-Updater.
+
+Search for:
+```text
+3DSC2C
+```
+
 ## How to use
 Here’s all you need to get started:
 
@@ -24,13 +41,7 @@ Here’s all you need to get started:
 
 This project uses **uv** for seamless dependency management.
 
-1. Clone the repo  
-   ```bash
-   git clone https://github.com/cylin577/3DSC2
-   cd 3DSC2
-   ```
-
-2. Run the application
+1. Run the application
    ```bash
    uv run 3dsc2.py
    ```
