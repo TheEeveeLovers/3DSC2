@@ -28,6 +28,14 @@ No Python or dependencies needed — just download and run.
 git clone https://github.com/cylin577/3DSC2
 cd 3DSC2
 ```
+
+#### CUDA Support
+Prebuilt binaries come with **CPU-only PyTorch** for compatibility and reducing binary size 
+If you need CUDA support, you'll need to build from source manually:
+```bash
+uv pip uninstall -y torch torchvision
+uv pip install torch torchvision
+```
 See [How to use](#how-to-use) below for running from source with `uv`.
 
 ### Installing 3DSC2C (3DS)
