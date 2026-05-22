@@ -18,15 +18,25 @@ jobs:
         include:
           - os: ubuntu-22.04
             arch: x64
-          - os: ubuntu-22.04-arm
-            arch: aarch64
+            artifact_name: 3DSC2-linux-x64
           - os: windows-latest
             arch: x64
+            artifact_name: 3DSC2-windows-x64.exe
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+            artifact_name: 3DSC2-linux-aarch64
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Set up uv
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev
+
+      - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -48,59 +58,55 @@ jobs:
       - name: Build with PyInstaller
         run: uv run pyinstaller --noconfirm 3dsc2.spec
 
-      - name: Upload artifact (Linux x64)
-        if: matrix.os == 'ubuntu-22.04' && matrix.arch == 'x64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: 3DSC2-linux-x64
-          path: dist/3dsc2
+      - name: Rename Artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv dist/3DSC2.exe dist/${{ matrix.artifact_name }}
+          else
+            mv dist/3DSC2 dist/${{ matrix.artifact_name }}
+          fi
 
-      - name: Upload artifact (Linux aarch64)
-        if: matrix.os == 'ubuntu-22.04-arm' && matrix.arch == 'aarch64'
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSC2-linux-aarch64
-          path: dist/3dsc2
-
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: 3DSC2-windows-x64.exe
-          path: dist/3dsc2.exe
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
 
   build-3ds:
     name: Build 3DS Calibration Client
     runs-on: ubuntu-latest
-    container: devkitpro/devkitarm:latest
-
+    container:
+      image: devkitpro/devkitarm:latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Install Build Tools
         run: |
           apt-get update && apt-get install -y wget unzip
-          wget https://github.com/Steveice10/bannertool/releases/download/1.2.0/bannertool.zip
-          unzip bannertool.zip -d .
-          cp linux-x86_64/bannertool /usr/local/bin/bannertool
+          # Install bannertool (diasurgical fork)
+          wget https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip -o bannertool.zip
+          mv linux-x86_64/bannertool /usr/local/bin/
           chmod +x /usr/local/bin/bannertool
+          # Install makerom (Project_CTR)
           wget https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
-          unzip makerom-v0.18.3-ubuntu_x86_64.zip -d .
-          cp makerom /usr/local/bin/makerom
+          unzip -o makerom-v0.18.3-ubuntu_x86_64.zip -d /usr/local/bin
           chmod +x /usr/local/bin/makerom
 
-      - name: Build 3dsx and cia
+      - name: Build .3dsx and .cia
         run: |
           cd calibration_client
           make 3dsx cia
 
-      - name: Upload 3dsx
+      - name: Upload 3DSX Artifact
         uses: actions/upload-artifact@v4
         with:
           name: 3DSC2-calibration-client.3dsx
           path: calibration_client/*.3dsx
 
-      - name: Upload cia
+      - name: Upload CIA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: 3DSC2-calibration-client.cia
@@ -111,14 +117,13 @@ jobs:
     needs: [build-python, build-3ds]
     runs-on: ubuntu-latest
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-
+          
       - name: Get latest release tag
         id: latest_release
         uses: actions/github-script@v7
