@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }} (${{ matrix.arch }})
+  build-python:
+    name: Build Python ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,7 +22,7 @@ jobs:
           - os: windows-latest
             arch: x64
             artifact_name: 3DSC2-windows-x64.exe
-          - os: ubuntu-24.04-arm64
+          - os: ubuntu-latest-arm64
             arch: aarch64
             artifact_name: 3DSC2-linux-aarch64
 
@@ -67,10 +67,32 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}
 
+  build-3ds:
+    name: Build 3DS Calibration Client
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build .3dsx and .cia
+        run: |
+          # Use the provided Makefile in calibration_client
+          make -C calibration_client cia
+
+      - name: Upload 3DS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DSC2-3DS-Homebrew
+          path: |
+            calibration_client/*.3dsx
+            calibration_client/*.cia
+
   release:
     name: Upload to Release
     if: github.event_name == 'release'
-    needs: build
+    needs: [build-python, build-3ds]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
