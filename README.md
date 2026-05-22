@@ -15,12 +15,20 @@ No capture card, no soldering.
 
 ## Installation
 
-### Installing 3DSC2 (PC)
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/cylin577/3DSC2
-   cd 3DSC2
-   ```
+### Option 1: Grab a prebuilt binary
+Head to the [Releases](https://github.com/cylin577/3DSC2/releases) page and download the latest build for your platform:
+- **Windows:** `3DSC2-windows-x64.exe`
+- **Linux x64:** `3DSC2-linux-x64`
+- **Linux aarch64:** `3DSC2-linux-aarch64`
+
+No Python or dependencies needed — just download and run.
+
+### Option 2: Clone and run from source
+```bash
+git clone https://github.com/cylin577/3DSC2
+cd 3DSC2
+```
+See [How to use](#how-to-use) below for running from source with `uv`.
 
 ### Installing 3DSC2C (3DS)
 You can install the calibration companion app directly from Universal-Updater.
@@ -29,6 +37,8 @@ Search for:
 ```text
 3DSC2C
 ```
+
+Or grab the `.3dsx` / `.cia` from the [Releases](https://github.com/cylin577/3DSC2/releases) page.
 
 ## How to use
 Here’s all you need to get started:
