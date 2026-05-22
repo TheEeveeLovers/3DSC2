@@ -40,6 +40,7 @@ from PyQt6.QtCore import (QTimer, QSettings, QPoint, QByteArray,
                           QEvent, QObject, pyqtSignal)
 from PyQt6.QtGui import QPainter, QPen, QMouseEvent, QCloseEvent, QImage
 from PyQt6.QtNetwork import QUdpSocket, QHostAddress
+from ai_agent import AIManager
 
 _splash.showMessage("Imports complete...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
 _app.processEvents()
@@ -1100,7 +1101,6 @@ class AppWindow(QMainWindow):
         if self.ai_manager is None:
             self.status_label.setText("Loading AI module...")
             QApplication.processEvents()
-            from ai_agent import AIManager
             self.ai_manager = AIManager()
             self.ai_manager.status_update.connect(self.status_label.setText)
         return self.ai_manager
